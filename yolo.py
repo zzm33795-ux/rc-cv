@@ -127,21 +127,30 @@ class VisionThread(QThread):
                         features.extend(angles)
 
                         # 4. 喂给机器学习模型进行预测
+                        # 4. 喂给机器学习模型进行预测
                         if self.clf_model is not None:
                             try:
-                                # 模型预测出的数字标签 (0, 1, 2, 3, 4)
-                                pred_class = self.clf_model.predict([features])[0]
+                                # 获取所有类别的概率分布
+                                prob_distributions = self.clf_model.predict_proba([features])[0]
+                                pred_class = np.argmax(prob_distributions)
+                                action_conf = float(prob_distributions[pred_class])  # 这才是真正的动作置信度
 
-                                # 映射为中文名称，如果标签是 4 (其他)，则判定为“未识别”以防 UI 误判
                                 if pred_class == 4:
                                     action_name = "正常活动"
                                 else:
                                     action_name = self.action_map.get(pred_class, "未知动作")
+
+                                # 将真正的 action_conf 传给 UI
+                                table_data.append([f"ID-{i + 1}", "人体姿态", f"{action_conf:.2f}", action_name])
+
+                                # 【加分项】直接在视频画面的人头顶上画出动作名字
+                                if action_name != "正常活动" and action_conf > 0.45:
+                                    x1, y1 = int(results[0].boxes.xyxy[i][0]), int(results[0].boxes.xyxy[i][1])
+                                    cv2.putText(annotated_frame, f"{action_name} {action_conf:.2f}",
+                                                (x1, max(10, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
                             except Exception as e:
                                 print(f"动作预测出错: {e}")
-
-                        conf = float(results[0].boxes.conf[i].cpu().numpy()) if results[0].boxes else 0.0
-                        table_data.append([f"ID-{i + 1}", "人体姿态", f"{conf:.2f}", action_name])
 
             # ==========================================================
 
@@ -151,7 +160,7 @@ class VisionThread(QThread):
             rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
-            qt_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            qt_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
             self.frame_signal.emit(qt_img)
 
         # 安全释放硬件资源

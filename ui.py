@@ -67,6 +67,9 @@ class MainWindow(QMainWindow):
         self.target_actions = ["举双手", "大字站", "蹲下", "弓箭步"]
         self.locked_actions = {action: False for action in self.target_actions}
 
+        # 【新增】防抖计数器：记录每个动作连续被识别到的帧数
+        self.action_counters = {action: 0 for action in self.target_actions}
+
         self.audio_history = []  # 已识别的音频历史记录
 
         self.init_ui()
@@ -258,7 +261,10 @@ class MainWindow(QMainWindow):
         self.btn_start_action.setStyleSheet("")
 
         self.stat_label.setText("识别成功统计: 0 / 4  (等待开始)")
+
+        # 【修改】除了锁定状态，防抖计数器也要一并清零
         self.locked_actions = {action: False for action in self.target_actions}
+        self.action_counters = {action: 0 for action in self.target_actions}
 
         for action, lbl in self.action_ui_elements.items():
             lbl.setText(f"等待识别 | {action}")
@@ -293,6 +299,9 @@ class MainWindow(QMainWindow):
 
         threshold = self.conf_slider.value() / 100.0
 
+        # 【新增】用来记录当前帧识别到了哪些目标动作
+        detected_this_frame = set()
+
         for data in data_list:
             if len(data) == 4:
                 _, _, conf_str, action_name = data
@@ -300,14 +309,25 @@ class MainWindow(QMainWindow):
                 conf = float(conf_str)
 
                 if clean_action in self.target_actions and conf > threshold:
-                    if not self.locked_actions[clean_action]:
-                        self.locked_actions[clean_action] = True
-                        self.success_count += 1
-                        self.stat_label.setText(f"识别成功统计: {self.success_count} / 4  (🔴 正在考核中)")
+                    detected_this_frame.add(clean_action)  # 记录本帧看到的动作
 
-                        lbl = self.action_ui_elements[clean_action]
-                        lbl.setText(f"已识别 | {clean_action} (Conf: {conf:.2f})")
-                        lbl.setStyleSheet("color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold;")
+                    if not self.locked_actions[clean_action]:
+                        self.action_counters[clean_action] += 1  # 连续检测到，计数器+1
+
+                        # 【核心防抖】必须连续稳定保持该动作 5 帧以上，才算真正考核通过！
+                        if self.action_counters[clean_action] >= 5:
+                            self.locked_actions[clean_action] = True
+                            self.success_count += 1
+                            self.stat_label.setText(f"识别成功统计: {self.success_count} / 4  (🔴 正在考核中)")
+
+                            lbl = self.action_ui_elements[clean_action]
+                            lbl.setText(f"已识别 | {clean_action} (Conf: {conf:.2f})")
+                            lbl.setStyleSheet("color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold;")
+
+        # 【新增】如果这帧没看到这个动作，意味着动作中断或变形了，计数器必须清零
+        for action in self.target_actions:
+            if action not in detected_this_frame:
+                self.action_counters[action] = 0
 
     def update_audio_score(self, prob_dist):
         # 如果没有听到有效音乐，恢复待机状态
