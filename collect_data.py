@@ -2,166 +2,137 @@ import cv2
 import numpy as np
 import csv
 import os
-import math
 from ultralytics import YOLO
 
-# 动作映射表保持不变
-ACTION_MAP = {'0': "大字站", '1': "弓箭步", '2': "举双手", '3': "蹲下", '4': "其他"}
-DISPLAY_MAP = {'0': "STAR STAND", '1': "LUNGE", '2': "RAISE HANDS", '3': "SQUAT", '4': "OTHERS"}
-CSV_FILE = "pose_data_optimized.csv"
+# 1. 后台数据映射表（保持不变，用于终端提示和数字保存）
+ACTION_MAP = {
+    '0': "大字站",
+    '1': "弓箭步",
+    '2': "举双手",
+    '3': "蹲下",
+    '4': "其他_正常走动弯腰"
+}
+
+# 2. 专门给 OpenCV 屏幕显示用的英文表（彻底解决问号乱码）
+DISPLAY_MAP = {
+    '0': "STAR STAND",
+    '1': "LUNGE",
+    '2': "RAISE HANDS",
+    '3': "SQUAT",
+    '4': "OTHERS / NOISE"
+}
+
+CSV_FILE = "pose_data.csv"
 
 
 def init_csv():
-    """初始化 CSV 文件，加入额外的角度特征列"""
+    """初始化 CSV 文件，写入表头"""
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, mode='w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             headers = []
-            # 1. 基础坐标特征 (34列)
             for i in range(17):
                 headers.extend([f"x_{i}", f"y_{i}"])
-            # 2. 补充角度特征 (8列)
-            headers.extend([
-                "angle_L_elbow", "angle_R_elbow",
-                "angle_L_shoulder", "angle_R_shoulder",
-                "angle_L_hip", "angle_R_hip",
-                "angle_L_knee", "angle_R_knee"
-            ])
             headers.append("label")
             writer.writerow(headers)
-        print(f"✅ 优化版数据集文件已初始化: {CSV_FILE}")
-
-
-def calculate_angle(p1, p2, p3):
-    """
-    计算三点构成的夹角 (p2 为顶点)
-    """
-    if np.all(p1 == 0) or np.all(p2 == 0) or np.all(p3 == 0):
-        return 0.0  # 关键点缺失时返回0
-
-    v1 = np.array(p1) - np.array(p2)
-    v2 = np.array(p3) - np.array(p2)
-
-    # 归一化向量并计算点积
-    cosine_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
-    cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
-    angle = np.degrees(np.arccos(cosine_angle))
-    return float(angle)
+        print(f"✅ 数据集文件已初始化: {CSV_FILE}")
 
 
 def main():
     init_csv()
 
-    print("⏳ 正在加载 yolo26n-pose 模型权重...")
+    print("⏳ 正在加载超轻量级 yolo26n-pose 模型权重...")
     model = YOLO('yolo26n-pose.pt')
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
+    # 状态控制
     is_recording = False
     current_label = None
-    memory_buffer = []
+    memory_buffer = []  # 内存缓冲区
 
     print("\n" + "=" * 40)
-    print("🚀 优化版姿态采集系统已启动（附带主目标锁定&角度特征提取）")
+    print("🚀 姿态数据采集系统（手动开关版）已启动！")
+    print("💡 操作指南：")
+    print("  1. 摆好姿势，按一下数字键 [0-4] 开始录制")
+    print("  2. 录制结束时，按一下 [空格键] 保存并停止")
+    print("  3. [按下 q 键] -> 退出程序")
     print("=" * 40 + "\n")
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret: break
+        if not ret:
+            break
 
         frame = cv2.flip(frame, 1)
 
+        # 硬件加速推理
         try:
             results = model(frame, verbose=False, classes=0, device=0, half=True)
         except Exception:
             results = model(frame, verbose=False, classes=0)
 
         annotated_frame = results[0].plot()
+
+        # 按键检测
         key = cv2.waitKey(1) & 0xFF
 
-        if key == ord('q'): break
+        if key == ord('q'):
+            break
 
-        # 状态机逻辑
+        # 核心控制状态机
         if not is_recording:
+            # 未录制状态下：检测 0-4 开启录制
             key_char = chr(key) if key != 255 else None
             if key_char in ACTION_MAP:
                 current_label = key_char
                 is_recording = True
                 memory_buffer = []
-                print(f"🎬 开始录制【{ACTION_MAP[current_label]}】，按 [空格] 结束...")
+                print(f"🎬 开始录制【{ACTION_MAP[current_label]}】，完成时请按 [空格键] 结束...")
         else:
+            # 录制状态下：检测空格键结束并保存
             if key == ord(' '):
                 is_recording = False
                 if len(memory_buffer) > 0:
-                    print(f"💾 正在写入 {len(memory_buffer)} 帧优化数据...")
+                    print(f"💾 正在将 {len(memory_buffer)} 帧数据写入 CSV...")
                     with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
-                        csv.writer(f).writerows(memory_buffer)
+                        writer = csv.writer(f)
+                        writer.writerows(memory_buffer)
                     print(f"✅ 【{ACTION_MAP[current_label]}】保存成功！\n")
                 memory_buffer = []
 
-        # ---------------- 核心优化区域 ----------------
+        # 录制时抓取骨骼点存入内存
         if is_recording and results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-            # 【优化1：防识别错人体】
-            # 计算画面中所有人的 Bounding Box 面积，锁定面积最大的那个（通常是操作者本人）
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            target_idx = 0
-            if len(boxes) > 1:
-                areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-                target_idx = np.argmax(areas)
-
-            kpts = results[0].keypoints.xy[target_idx].cpu().numpy()
-            confs = results[0].keypoints.conf[target_idx].cpu().numpy() if results[
-                                                                               0].keypoints.conf is not None else np.ones(
-                17)
-
-            # 【优化2：脏数据过滤】
-            # 针对侧面弓箭步和深蹲，如果下半身（11-16）置信度太低，说明没拍全，抛弃这一帧
-            if np.mean(confs[11:17]) < 0.4:
-                cv2.putText(annotated_frame, "WARNING: LEGS NOT VISIBLE!", (30, 90),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
-                # 不执行 append，跳过这一帧
-            elif len(kpts) == 17:
+            kpts = results[0].keypoints.xy[0].cpu().numpy()
+            if len(kpts) == 17:
+                # 归一化计算
                 hip_center_x = (kpts[11][0] + kpts[12][0]) / 2
                 hip_center_y = (kpts[11][1] + kpts[12][1]) / 2
                 sh_center_y = (kpts[5][1] + kpts[6][1]) / 2
                 torso_len = max(10.0, abs(hip_center_y - sh_center_y))
 
                 features = []
-                # 提取 1：归一化坐标
                 for x, y in kpts:
-                    rel_x = (x - hip_center_x) / torso_len if x > 0 else 0
-                    rel_y = (y - hip_center_y) / torso_len if y > 0 else 0
+                    rel_x = (x - hip_center_x) / torso_len
+                    rel_y = (y - hip_center_y) / torso_len
                     features.extend([rel_x, rel_y])
 
-                # 【优化3：引入关节角度特征】
-                # 这8个角度对分类 这4个特定动作 极其敏感
-                angles = [
-                    calculate_angle(kpts[5], kpts[7], kpts[9]),  # 左肘夹角 (大字/举手 区分关键)
-                    calculate_angle(kpts[6], kpts[8], kpts[10]),  # 右肘夹角
-                    calculate_angle(kpts[11], kpts[5], kpts[7]),  # 左肩腋下夹角 (大字站关键)
-                    calculate_angle(kpts[12], kpts[6], kpts[8]),  # 右肩腋下夹角
-                    calculate_angle(kpts[5], kpts[11], kpts[13]),  # 左髋夹角 (深蹲/弓箭步 区分关键)
-                    calculate_angle(kpts[6], kpts[12], kpts[14]),  # 右髋夹角
-                    calculate_angle(kpts[11], kpts[13], kpts[15]),  # 左膝夹角 (深蹲/弓箭步 区分关键)
-                    calculate_angle(kpts[12], kpts[14], kpts[16])  # 右膝夹角
-                ]
-                features.extend(angles)
                 features.append(int(current_label))
                 memory_buffer.append(features)
-        # ----------------------------------------------
 
-        # UI 渲染
+        # 界面 UI 渲染（全英文，规避乱码）
         if is_recording:
-            status_text = f"REC [{DISPLAY_MAP[current_label]}] | Frames: {len(memory_buffer)}"
-            color = (0, 0, 255)
+            status_text = f"RECORDING [{DISPLAY_MAP[current_label]}] | Frames: {len(memory_buffer)}"
+            text_color = (0, 0, 255)  # 红色
         else:
-            status_text = "STATUS: READY (Press 0-4)"
-            color = (0, 255, 0)
+            status_text = "STATUS: READY (Press 0-4 to start)"
+            text_color = (0, 255, 0)  # 绿色
 
-        cv2.putText(annotated_frame, status_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
-        cv2.imshow("Data Collector", annotated_frame)
+        cv2.putText(annotated_frame, status_text, (30, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, text_color, 2, cv2.LINE_AA)
+        cv2.imshow("Data Collector (Click to Start / Space to Stop)", annotated_frame)
 
     cap.release()
     cv2.destroyAllWindows()
