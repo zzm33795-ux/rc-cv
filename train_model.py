@@ -29,7 +29,6 @@ def main():
     df = pd.read_csv(CSV_FILE)
 
     # 2. 拆分特征(X)和标签(y)
-    # 特征是前 34 列 (x_0, y_0 ... x_16, y_16)，最后一列是 label
     X = df.iloc[:, :-1].values
     y = df.iloc[:, -1].values
 
@@ -41,8 +40,8 @@ def main():
     if len(df) < 100:
         print("⚠️ 警告：数据量太少，模型可能无法准确泛化，建议每个动作至少录制 200 帧以上。")
 
-    # 3. 划分训练集和测试集（80% 拿来训练，20% 拿来测试模型准不准）
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_test_split=0.2, random_state=42, stratify=y)
+    # 3. 划分训练集和测试集
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
     print("\n🤖 正在使用随机森林（Random Forest）算法训练分类器...")
     # 使用随机森林分类器，鲁棒性极强，防误触效果最好
@@ -56,7 +55,14 @@ def main():
     print(f"\n🎯 核心评估指标 —— 模型在测试集上的准确率: {accuracy * 100:.2f}%")
 
     print("\n详细分类报告:")
-    print(classification_report(y_test, y_pred, target_names=[ACTION_MAP[i] for i in sorted(ACTION_MAP.keys())]))
+    # ================= 修复区域 =================
+    # 动态获取当前数据集里实际存在的标签（比如只录了0,1,2,3，就把这四个挑出来）
+    unique_labels = np.unique(y)
+    actual_target_names = [ACTION_MAP[i] for i in unique_labels]
+
+    # 将实际存在的标签和名字传给报告函数，完美避免 ValueError
+    print(classification_report(y_test, y_pred, labels=unique_labels, target_names=actual_target_names))
+    # ============================================
 
     # 5. 保存模型为 .pkl 文件
     joblib.dump(model, MODEL_FILE)
