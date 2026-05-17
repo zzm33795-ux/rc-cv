@@ -15,7 +15,7 @@ ACTION_MAP = {
     4: "其他_正常走动弯腰"
 }
 
-CSV_FILE = "pose_data.csv"
+CSV_FILE = "pose_data_optimized.csv"
 MODEL_FILE = "pose_classifier.pkl"
 
 
