@@ -52,7 +52,7 @@ def calculate_angle(p1, p2, p3):
 def main():
     init_csv()
 
-    print("⏳ 正在加载 yolo26n-pose 模型权重...")
+    print("⏳ 正在加载 yolo26m-pose 模型权重...")
     model = YOLO('yolo26m-pose.pt')
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
