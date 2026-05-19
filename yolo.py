@@ -91,66 +91,99 @@ class VisionThread(QThread):
             annotated_frame = results[0].plot()
             table_data = []
 
-            # ================= 核心重构区：AI 模型推断 =================
+            # ================= 核心重构区：AI 模型推断与多重物理锁互锁 =================
             if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-                for i, person_kpts in enumerate(results[0].keypoints.xy):
-                    kpts = person_kpts.cpu().numpy()
+                # 【加分项优化：主目标锁定机制】防止身后的裁判或路人乱入干扰记分板
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                target_idx = 0
+                if len(boxes) > 1:
+                    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                    target_idx = np.argmax(areas)
 
-                    if len(kpts) == 17:
-                        action_name = "未识别"
+                kpts = results[0].keypoints.xy[target_idx].cpu().numpy()
 
-                        # 1. 计算归一化基准：髋关节中心点 和 躯干长度
-                        hip_center_x = (kpts[11][0] + kpts[12][0]) / 2
-                        hip_center_y = (kpts[11][1] + kpts[12][1]) / 2
-                        sh_center_y = (kpts[5][1] + kpts[6][1]) / 2
-                        torso_len = max(10.0, abs(hip_center_y - sh_center_y))
+                # 获取关键点的置信度，用来判断腿到底有没有露出来
+                confs = results[0].keypoints.conf[target_idx].cpu().numpy() if results[
+                                                                                   0].keypoints.conf is not None else np.ones(
+                    17)
 
-                        features = []
+                if len(kpts) == 17:
+                    action_name = "未识别"
 
-                        # 2. 提取 34 维基础坐标特征 (完全复刻采集脚本)
-                        for x, y in kpts:
-                            rel_x = (x - hip_center_x) / torso_len if x > 0 else 0
-                            rel_y = (y - hip_center_y) / torso_len if y > 0 else 0
-                            features.extend([rel_x, rel_y])
+                    # 1. 计算归一化基准：髋关节中心点 和 躯干长度
+                    hip_center_x = (kpts[11][0] + kpts[12][0]) / 2
+                    hip_center_y = (kpts[11][1] + kpts[12][1]) / 2
+                    sh_center_y = (kpts[5][1] + kpts[6][1]) / 2
+                    torso_len = max(10.0, abs(hip_center_y - sh_center_y))
 
-                        # 3. 提取 8 维关键角度特征
-                        angles = [
-                            calculate_angle(kpts[5], kpts[7], kpts[9]),  # 左肘
-                            calculate_angle(kpts[6], kpts[8], kpts[10]),  # 右肘
-                            calculate_angle(kpts[11], kpts[5], kpts[7]),  # 左肩
-                            calculate_angle(kpts[12], kpts[6], kpts[8]),  # 右肩
-                            calculate_angle(kpts[5], kpts[11], kpts[13]),  # 左髋
-                            calculate_angle(kpts[6], kpts[12], kpts[14]),  # 右髋
-                            calculate_angle(kpts[11], kpts[13], kpts[15]),  # 左膝
-                            calculate_angle(kpts[12], kpts[14], kpts[16])  # 右膝
-                        ]
-                        features.extend(angles)
+                    features = []
 
-                        # 4. 喂给机器学习模型进行预测
-                        # 4. 喂给机器学习模型进行预测
-                        if self.clf_model is not None:
-                            try:
-                                # 获取所有类别的概率分布
+                    # 2. 提取 34 维基础坐标特征
+                    for x, y in kpts:
+                        rel_x = (x - hip_center_x) / torso_len if x > 0 else 0
+                        rel_y = (y - hip_center_y) / torso_len if y > 0 else 0
+                        features.extend([rel_x, rel_y])
+
+                    # 3. 提取 8 维关键角度特征
+                    angles = [
+                        calculate_angle(kpts[5], kpts[7], kpts[9]),  # 左肘 [0]
+                        calculate_angle(kpts[6], kpts[8], kpts[10]),  # 右肘 [1]
+                        calculate_angle(kpts[11], kpts[5], kpts[7]),  # 左肩 [2]
+                        calculate_angle(kpts[12], kpts[6], kpts[8]),  # 右肩 [3]
+                        calculate_angle(kpts[5], kpts[11], kpts[13]),  # 左髋 [4]
+                        calculate_angle(kpts[6], kpts[12], kpts[14]),  # 右髋 [5]
+                        calculate_angle(kpts[11], kpts[13], kpts[15]),  # 左膝 [6]
+                        calculate_angle(kpts[12], kpts[14], kpts[16])  # 右膝 [7]
+                    ]
+                    features.extend(angles)
+
+                    # 4. 【核心防误触】多重物理限位锁检查
+                    # 互锁关卡 A：检查下半身核心关键点（左膝13, 右膝14, 左踝15, 右踝16）是否丢失或置信度太低
+                    legs_invisible = (
+                            np.all(kpts[13] == 0) or np.all(kpts[14] == 0) or
+                            np.all(kpts[15] == 0) or np.all(kpts[16] == 0) or
+                            np.mean(confs[11:17]) < 0.4  # 平均置信度低于阈值说明下半身被遮挡或未入画
+                    )
+
+                    # 5. 喂给机器学习模型进行预测
+                    if self.clf_model is not None:
+                        try:
+                            if legs_invisible:
+                                # 如果触发了关卡 A（腿没露全），直接熔断拦截，不让 AI 盲猜
+                                action_name = "正常活动"
+                                action_conf = 1.0
+                            else:
+                                # 只有腿部健全在画面内，才允许神经网络大脑介入推断
                                 prob_distributions = self.clf_model.predict_proba([features])[0]
                                 pred_class = np.argmax(prob_distributions)
-                                action_conf = float(prob_distributions[pred_class])  # 这才是真正的动作置信度
+                                action_conf = float(prob_distributions[pred_class])  # 真正的动作置信度
 
                                 if pred_class == 4:
                                     action_name = "正常活动"
                                 else:
                                     action_name = self.action_map.get(pred_class, "未知动作")
 
-                                # 将真正的 action_conf 传给 UI
-                                table_data.append([f"ID-{i + 1}", "人体姿态", f"{action_conf:.2f}", action_name])
+                                # 互锁关卡 B：后置几何夹角锁
+                                # 如果 AI 觉得是“蹲下”，但测出的膝盖还挺直着（角度 > 130°），必然是误触！
+                                if action_name == "蹲下":
+                                    left_knee_angle = angles[6]
+                                    right_knee_angle = angles[7]
+                                    if left_knee_angle > 130.0 or right_knee_angle > 130.0:
+                                        action_name = "正常活动"
+                                        action_conf = 0.0
 
-                                # 【加分项】直接在视频画面的人头顶上画出动作名字
-                                if action_name != "正常活动" and action_conf > 0.45:
-                                    x1, y1 = int(results[0].boxes.xyxy[i][0]), int(results[0].boxes.xyxy[i][1])
-                                    cv2.putText(annotated_frame, f"{action_name} {action_conf:.2f}",
-                                                (x1, max(10, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            # 将真正的 action_conf 传给 UI
+                            table_data.append([f"ID-{target_idx + 1}", "人体姿态", f"{action_conf:.2f}", action_name])
 
-                            except Exception as e:
-                                print(f"动作预测出错: {e}")
+                            # 在视频画面上实时渲染动作和置信度
+                            if action_name != "正常活动" and action_conf > 0.45:
+                                x1, y1 = int(results[0].boxes.xyxy[target_idx][0]), int(
+                                    results[0].boxes.xyxy[target_idx][1])
+                                cv2.putText(annotated_frame, f"{action_name} {action_conf:.2f}",
+                                            (x1, max(10, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                        except Exception as e:
+                            print(f"动作预测出错: {e}")
 
             # ==========================================================
 
