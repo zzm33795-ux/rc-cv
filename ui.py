@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
-# 导入自研核心模块
 from yolo import VisionThread
 from audio import ShazamAlgorithm, AudioThread
 
@@ -18,7 +17,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("机器人视觉与音频识别系统")
         self.resize(1150, 780)
 
-        # 简洁专业的深色 QSS 样式表
         self.setStyleSheet("""
             QMainWindow { background-color: #121212; }
             QWidget { font-family: 'Microsoft YaHei', 'Segoe UI'; color: #e0e0e0; }
@@ -42,11 +40,9 @@ class MainWindow(QMainWindow):
             QPushButton#BtnStop:hover { background-color: #e74c3c; }
             QPushButton#BtnReset { background-color: #f39c12; color: #fff; }
             QPushButton#BtnReset:hover { background-color: #f1c40f; }
-
             QLabel.ScoreItem { font-size: 14px; background-color: #2b2b2b; padding: 8px; border-radius: 4px; border: 1px solid #444; }
             QLabel.ScoreItemReady { color: #aaaaaa; }
             QLabel.ScoreItemSuccess { color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold; }
-
             QListWidget { background-color: #1a1a1a; border: 1px solid #444; border-radius: 4px; color: #2ecc71; padding: 5px; font-size: 13px;}
         """)
 
@@ -61,16 +57,15 @@ class MainWindow(QMainWindow):
         self.fps_frames = 0
         self.fps_start_time = time.time()
 
-        # --- 核心状态追踪变量 ---
-        self.is_action_evaluating = False  # 动作考核状态锁
+        self.is_action_evaluating = False
         self.success_count = 0
         self.target_actions = ["举双手", "大字站", "蹲下", "弓箭步"]
         self.locked_actions = {action: False for action in self.target_actions}
 
-        # 【新增】防抖计数器：记录每个动作连续被识别到的帧数
+        self.debounce_frames = 8
         self.action_counters = {action: 0 for action in self.target_actions}
 
-        self.audio_history = []  # 已识别的音频历史记录
+        self.audio_history = []
 
         self.init_ui()
         self.bind_logic()
@@ -82,7 +77,6 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ================= 左侧：控制面板 =================
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(290)
@@ -106,10 +100,10 @@ class MainWindow(QMainWindow):
         cam_layout.addWidget(QLabel("选择摄像头:"))
         cam_layout.addWidget(self.cam_combo)
 
-        cam_layout.addWidget(QLabel("动作置信度阈值:"))
+        cam_layout.addWidget(QLabel("姿态置信度阈值:"))
         self.conf_slider = QSlider(Qt.Horizontal)
         self.conf_slider.setRange(20, 90)
-        self.conf_slider.setValue(45)
+        self.conf_slider.setValue(60)
         cam_layout.addWidget(self.conf_slider)
         side_layout.addWidget(cam_group)
 
@@ -117,22 +111,26 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("StatusLabel")
         self.status_label.setWordWrap(True)
         side_layout.addWidget(self.status_label)
-
         side_layout.addStretch()
 
-        # --- 全新设计的竞赛化按钮布局 ---
-        self.btn_run = QPushButton("▶ 1. 启动系统传感器")
+        self.btn_run = QPushButton("▶ 1. 启动视觉模块")
         self.btn_run.setObjectName("BtnStart")
         self.btn_run.setFixedHeight(45)
         side_layout.addWidget(self.btn_run)
 
-        self.btn_start_action = QPushButton("🎯 2. 开始动作考核")
+        self.btn_start_action = QPushButton("🎯 2. 开始姿态识别")
         self.btn_start_action.setObjectName("BtnAction")
         self.btn_start_action.setFixedHeight(45)
-        self.btn_start_action.setEnabled(False)  # 未开机前禁用
+        self.btn_start_action.setEnabled(False)
         side_layout.addWidget(self.btn_start_action)
 
-        self.btn_reset = QPushButton("↺ 重置所有记分板")
+        self.btn_start_audio = QPushButton("🎵 3. 开始音乐识别 (最长15s)")
+        self.btn_start_audio.setObjectName("BtnAction")
+        self.btn_start_audio.setStyleSheet("background-color: #8e44ad; font-size: 15px;")
+        self.btn_start_audio.setFixedHeight(45)
+        side_layout.addWidget(self.btn_start_audio)
+
+        self.btn_reset = QPushButton("↺ 4. 重置识别状态")
         self.btn_reset.setObjectName("BtnReset")
         side_layout.addWidget(self.btn_reset)
 
@@ -140,7 +138,6 @@ class MainWindow(QMainWindow):
         self.btn_stop.setObjectName("BtnStop")
         side_layout.addWidget(self.btn_stop)
 
-        # ================= 右侧：画面与结果 =================
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(15, 15, 15, 15)
@@ -151,44 +148,39 @@ class MainWindow(QMainWindow):
         self.video_label.setMinimumHeight(440)
         right_layout.addWidget(self.video_label, 6)
 
-        # 底部记分板
         score_board_layout = QHBoxLayout()
 
-        # 1. 姿态任务面板
-        vision_group = QGroupBox("任务一: 姿态识别 (40分)")
+        vision_group = QGroupBox("任务一: 姿态识别 (总分: 40分 | 单项: 10分)")
         vision_layout = QVBoxLayout(vision_group)
-
-        self.stat_label = QLabel("识别成功统计: 0 / 4  (当前未开启考核)")
+        self.stat_label = QLabel("姿态得分: 0 / 40  (当前进度: 0/4)")
         self.stat_label.setObjectName("StatLabel")
         vision_layout.addWidget(self.stat_label)
 
         action_grid = QGridLayout()
         self.action_ui_elements = {}
         for i, action in enumerate(self.target_actions):
-            lbl = QLabel(f"等待识别 | {action}")
+            lbl = QLabel(f"等待指令 | {action}")
             lbl.setProperty("class", "ScoreItem ScoreItemReady")
             lbl.setAlignment(Qt.AlignCenter)
             self.action_ui_elements[action] = lbl
             action_grid.addWidget(lbl, i // 2, i % 2)
         vision_layout.addLayout(action_grid)
 
-        # 2. 音频任务面板 (分离了实时分布和历史记录)
-        audio_group = QGroupBox("任务二: 音乐匹配 (30分)")
+        audio_group = QGroupBox("任务二: 音乐识别 (总分: 30分 | 单项: 6分)")
         audio_layout = QVBoxLayout(audio_group)
-
-        lbl_live = QLabel("▶ 实时概率分布 (15秒窗口):")
+        lbl_live = QLabel("▶ 实时特征概率分布:")
         lbl_live.setStyleSheet("color: #ccc; font-weight: bold;")
         audio_layout.addWidget(lbl_live)
 
         self.audio_ui_elements = []
-        for i in range(5):  # 这里压缩了间距，为下面历史记录腾出空间
-            lbl = QLabel(f"{i + 1}. 暂无结果")
+        for i in range(5):
+            lbl = QLabel(f"{i + 1}. 等待采样")
             lbl.setProperty("class", "ScoreItem ScoreItemReady")
             lbl.setContentsMargins(0, 0, 0, 0)
             self.audio_ui_elements.append(lbl)
             audio_layout.addWidget(lbl)
 
-        lbl_hist = QLabel("💾 已识别记录:")
+        lbl_hist = QLabel("💾 极速匹配记录:")
         lbl_hist.setStyleSheet("color: #ccc; font-weight: bold; margin-top: 5px;")
         audio_layout.addWidget(lbl_hist)
 
@@ -206,7 +198,9 @@ class MainWindow(QMainWindow):
         self.btn_run.clicked.connect(self.start_process)
         self.btn_stop.clicked.connect(self.stop_process)
         self.btn_reset.clicked.connect(self.reset_results)
+
         self.btn_start_action.clicked.connect(self.toggle_action_eval)
+        self.btn_start_audio.clicked.connect(self.start_audio_eval)
 
         self.vision_thread.frame_signal.connect(self.update_frame)
         self.vision_thread.result_signal.connect(self.update_vision_score)
@@ -214,69 +208,81 @@ class MainWindow(QMainWindow):
 
         self.audio_thread.msg_signal.connect(self.update_status)
         self.audio_thread.result_signal.connect(self.update_audio_score)
+        self.audio_thread.finished_signal.connect(self.on_audio_finished)
 
     def start_process(self):
         self.reset_results()
         self.fps_frames = 0
         self.fps_start_time = time.time()
-
         self.vision_thread.set_camera(self.cam_combo.currentIndex())
         self.vision_thread.start()
-        self.audio_thread.start()
-
-        self.btn_start_action.setEnabled(True)  # 系统启动后，允许开启考核
-        self.update_status("系统传感器已启动，随时可以开始考核。")
+        self.btn_start_action.setEnabled(True)
+        self.update_status("视觉模块已启动。音乐识别可随时独立触发。")
 
     def toggle_action_eval(self):
-        """控制是否正式开始抓取动作算分"""
         self.is_action_evaluating = not self.is_action_evaluating
         if self.is_action_evaluating:
-            self.btn_start_action.setText("⏸ 暂停动作考核")
+            self.btn_start_action.setText("⏸ 暂停姿态识别")
             self.btn_start_action.setStyleSheet("background-color: #e67e22; color: #fff;")
-            self.stat_label.setText(f"识别成功统计: {self.success_count} / 4  (🔴 正在考核中)")
-            self.update_status("考核已开启，请做出指定动作！")
+            self.stat_label.setText(f"姿态得分: {self.success_count * 10} / 40  (🔴 正在识别)")
+            self.update_status("姿态识别已开启，请按裁判指令做出动作。")
         else:
-            self.btn_start_action.setText("🎯 2. 开始动作考核")
+            self.btn_start_action.setText("🎯 2. 开始姿态识别")
             self.btn_start_action.setStyleSheet("background-color: #2980b9; color: #fff;")
-            self.stat_label.setText(f"识别成功统计: {self.success_count} / 4  (⏸ 已暂停)")
-            self.update_status("考核已暂停。")
+            self.stat_label.setText(f"姿态得分: {self.success_count * 10} / 40  (⏸ 识别已暂停)")
+            self.update_status("姿态识别已暂停。")
+
+    def start_audio_eval(self):
+        self.btn_start_audio.setEnabled(False)
+        self.btn_start_audio.setText("⏳ 正在智能聆听中 (最长15秒)...")
+        self.btn_start_audio.setStyleSheet("background-color: #7f8c8d; color: #fff; font-size: 15px;")
+
+        for i in range(5):
+            self.audio_ui_elements[i].setText(f"{i + 1}. 🎤 正在动态捕获音频...")
+            self.audio_ui_elements[i].setStyleSheet("color: #f39c12;")
+
+        self.audio_thread.start()
+
+    def on_audio_finished(self):
+        self.btn_start_audio.setEnabled(True)
+        self.btn_start_audio.setText("🎵 3. 开始音乐识别 (最长15s)")
+        self.btn_start_audio.setStyleSheet("background-color: #8e44ad; font-size: 15px;")
 
     def stop_process(self):
         self.vision_thread.stop()
-        self.audio_thread.stop()
+        if self.audio_thread.isRunning():
+            self.audio_thread.stop()
+
         self.video_label.clear()
         self.video_label.setText("无视频信号")
         self.btn_start_action.setEnabled(False)
         self.is_action_evaluating = False
-        self.btn_start_action.setText("🎯 2. 开始动作考核")
+        self.btn_start_action.setText("🎯 2. 开始姿态识别")
         self.btn_start_action.setStyleSheet("")
-        self.update_status("系统已停止")
+        self.update_status("系统已停止运行。")
         self.fps_label.setText("实时 FPS: 0.0")
 
     def reset_results(self):
-        """全面重置：应对裁判要求的两次机会"""
         self.success_count = 0
         self.is_action_evaluating = False
-        self.btn_start_action.setText("🎯 2. 开始动作考核")
+        self.btn_start_action.setText("🎯 2. 开始姿态识别")
         self.btn_start_action.setStyleSheet("")
+        self.stat_label.setText("姿态得分: 0 / 40  (等待开始)")
 
-        self.stat_label.setText("识别成功统计: 0 / 4  (等待开始)")
-
-        # 【修改】除了锁定状态，防抖计数器也要一并清零
         self.locked_actions = {action: False for action in self.target_actions}
         self.action_counters = {action: 0 for action in self.target_actions}
 
         for action, lbl in self.action_ui_elements.items():
-            lbl.setText(f"等待识别 | {action}")
+            lbl.setText(f"等待指令 | {action}")
             lbl.setStyleSheet("")
 
         for i, lbl in enumerate(self.audio_ui_elements):
-            lbl.setText(f"{i + 1}. 暂无结果")
+            lbl.setText(f"{i + 1}. 等待采样")
             lbl.setStyleSheet("")
 
-        # 清空音频历史
         self.audio_history.clear()
         self.audio_history_list.clear()
+        self.update_status("所有状态已重置，准备开始新一轮考核。")
 
     def update_frame(self, qt_img):
         pix = QPixmap.fromImage(qt_img).scaled(
@@ -293,13 +299,10 @@ class MainWindow(QMainWindow):
             self.fps_start_time = current_time
 
     def update_vision_score(self, data_list):
-        # 仅当点击了“开始动作考核”后，才进行动作判断和锁定
         if not self.is_action_evaluating:
             return
 
         threshold = self.conf_slider.value() / 100.0
-
-        # 【新增】用来记录当前帧识别到了哪些目标动作
         detected_this_frame = set()
 
         for data in data_list:
@@ -309,54 +312,42 @@ class MainWindow(QMainWindow):
                 conf = float(conf_str)
 
                 if clean_action in self.target_actions and conf > threshold:
-                    detected_this_frame.add(clean_action)  # 记录本帧看到的动作
-
+                    detected_this_frame.add(clean_action)
                     if not self.locked_actions[clean_action]:
-                        self.action_counters[clean_action] += 1  # 连续检测到，计数器+1
-
-                        # 【核心防抖】必须连续稳定保持该动作 5 帧以上，才算真正考核通过！
-                        if self.action_counters[clean_action] >= 5:
+                        self.action_counters[clean_action] += 1
+                        if self.action_counters[clean_action] >= self.debounce_frames:
                             self.locked_actions[clean_action] = True
                             self.success_count += 1
-                            self.stat_label.setText(f"识别成功统计: {self.success_count} / 4  (🔴 正在考核中)")
-
+                            self.stat_label.setText(f"姿态得分: {self.success_count * 10} / 40  (🔴 正在识别)")
                             lbl = self.action_ui_elements[clean_action]
-                            lbl.setText(f"已识别 | {clean_action} (Conf: {conf:.2f})")
+                            lbl.setText(f"识别成功 (+10分) | {clean_action}")
                             lbl.setStyleSheet("color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold;")
 
-        # 【新增】如果这帧没看到这个动作，意味着动作中断或变形了，计数器必须清零
         for action in self.target_actions:
             if action not in detected_this_frame:
                 self.action_counters[action] = 0
 
     def update_audio_score(self, prob_dist):
-        # 如果没有听到有效音乐，恢复待机状态
         if not prob_dist:
             for i in range(5):
-                self.audio_ui_elements[i].setText(f"{i + 1}. 暂无结果")
+                self.audio_ui_elements[i].setText(f"{i + 1}. 未匹配到数据库特征")
                 self.audio_ui_elements[i].setStyleSheet("color: #aaaaaa;")
             return
 
-        # 只要听到了音乐，强制渲染出前 5 名的所有概率
         for i in range(5):
             lbl = self.audio_ui_elements[i]
             if i < len(prob_dist):
                 song_name, prob = prob_dist[i]
-
-                # 哪怕是 0.0%，也强制显示出来，完美契合赛题的“分布”要求
                 lbl.setText(f"{i + 1}. {song_name} - {prob:.1f}%")
 
                 if i == 0 and prob > 50:
                     lbl.setStyleSheet("color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold;")
-
-                    # 自动存入历史记录
                     import time
                     if song_name not in self.audio_history:
                         self.audio_history.append(song_name)
                         time_str = time.strftime('%H:%M:%S')
-                        self.audio_history_list.addItem(f"[{time_str}] 成功识别: {song_name}")
+                        self.audio_history_list.addItem(f"[{time_str}] 匹配成功 (+6分): {song_name}")
                 else:
-                    # 其他落选歌曲正常显示白色字体
                     lbl.setStyleSheet("color: #e0e0e0;")
 
     def update_status(self, msg):
@@ -364,7 +355,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.vision_thread.stop()
-        self.audio_thread.stop()
+        if self.audio_thread.isRunning():
+            self.audio_thread.stop()
         event.accept()
 
 

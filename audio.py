@@ -117,55 +117,87 @@ class ShazamAlgorithm:
 
         return sorted(probability_distribution, key=lambda x: x[1], reverse=True)
 
+
 class AudioThread(QThread):
-    """麦克风后台监听多线程"""
+    """麦克风动态智能拾音线程 (最长15秒，识别到即刻停止)"""
     result_signal = Signal(list)
     msg_signal = Signal(str)
+    finished_signal = Signal()  # 新增：告诉 UI 录音已结束，可以恢复按钮
 
     def __init__(self, shazam_engine):
         super().__init__()
-        self.running = False
         self.engine = shazam_engine
         self.sample_rate = 22050
-
-        # 针对赛题 15 秒限制的致命优化：
-        # 将原本的 10 秒窗口缩短为 5 秒。
-        # 这样在 15 秒内，系统会自动进行近 3 次快速尝试，极大提升容错率
-        self.duration = 5
+        self.chunk_duration = 3  # 采样切片：每次监听 3 秒
+        self.max_duration = 15  # 赛题最大限制：15 秒
+        self.running = False
 
     def run(self):
         self.running = True
-        self.msg_signal.emit("🎤 麦克风已开启，开始全场拾音...")
+        try:
+            self.msg_signal.emit("🎤 正在智能监听音频 (最长15秒，识别即停)...")
+            cumulative_audio = np.array([], dtype='float32')
+            max_iters = int(self.max_duration / self.chunk_duration)
 
-        while self.running:
-            try:
-                recording = sd.rec(int(self.duration * self.sample_rate),
+            match_found = False
+
+            for i in range(max_iters):
+                if not self.running:
+                    break
+
+                # 采集一个 3 秒的音频切片
+                recording = sd.rec(int(self.chunk_duration * self.sample_rate),
                                    samplerate=self.sample_rate,
                                    channels=1, dtype='float32')
                 sd.wait()
 
-                if not self.running: break
+                if not self.running:
+                    break
 
-                audio_data = recording.flatten()
+                chunk_data = recording.flatten()
+                # 将新切片拼接到累积的音频带中
+                cumulative_audio = np.concatenate((cumulative_audio, chunk_data))
 
-                # 返回的数据格式变为: [('《指定曲目一》', 85.5), ('《指定曲目二》', 10.2), ...]
-                matches = self.engine.identify_audio(audio_data, self.sample_rate)
+                # 立即用沙赞算法分析当前累积的音频
+                matches = self.engine.identify_audio(cumulative_audio, self.sample_rate)
 
-                if matches and matches[0][1] > 0:
+                # 如果有音乐特征，且排名第一的匹配概率达到 50% 以上，触发提早熔断锁分！
+                if matches and matches[0][1] >= 50.0:
                     top_song = matches[0][0]
-                    # 格式化提取概率大于0的项，拼接为直观的字符串
                     dist_str = " | ".join([f"{song}: {prob:.1f}%" for song, prob in matches if prob > 0])
-
-                    self.msg_signal.emit(f"🎵 识别成功: {top_song} (分布: {dist_str})")
+                    self.msg_signal.emit(f"🎵 锁定: {top_song} (用时 {(i + 1) * self.chunk_duration}秒)")
                     self.result_signal.emit(matches)
+                    match_found = True
+                    break
                 else:
-                    self.msg_signal.emit("🔇 正在滤除环境噪音，重新收集中...")
+                    self.msg_signal.emit(f"⏳ 正在分析旋律中... (已听 {(i + 1) * self.chunk_duration}/15秒)")
+                    # 发送中间态的低置信度数据供UI实时显示概率跳动，但不会触发记分板
+                    self.result_signal.emit(matches)
+
+            # 如果 15 秒跑满了还没过 50% 的置信度
+            if not match_found and self.running:
+                if cumulative_audio.size > 0:
+                    final_matches = self.engine.identify_audio(cumulative_audio, self.sample_rate)
+                    if final_matches and final_matches[0][1] > 0:
+                        self.msg_signal.emit("⚠️ 15秒用尽，给出最高概率推测。")
+                        self.result_signal.emit(final_matches)
+                    else:
+                        self.msg_signal.emit("🔇 15秒内未识别到有效音乐，请重试。")
+                        self.result_signal.emit([])
+                else:
+                    self.msg_signal.emit("🔇 收音异常，未获取到有效数据。")
                     self.result_signal.emit([])
 
-            except Exception as e:
-                self.msg_signal.emit(f"❌ 音频模块报错: {str(e)}")
-                break
+        except Exception as e:
+            self.msg_signal.emit(f"❌ 音频模块报错: {str(e)}")
+            self.result_signal.emit([])
+
+        self.running = False
+        self.finished_signal.emit()  # 释放 UI 按钮
 
     def stop(self):
         self.running = False
+        import sounddevice as sd
+        sd.stop()
+        self.quit()
         self.wait()
