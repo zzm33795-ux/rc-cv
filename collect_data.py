@@ -3,6 +3,7 @@ import numpy as np
 import csv
 import os
 import math
+import time
 from ultralytics import YOLO
 
 # 动作映射表保持不变
@@ -59,9 +60,11 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    is_recording = False
+    state = "idle"          # idle / countdown / recording
     current_label = None
     memory_buffer = []
+    countdown_end = 0
+    recording_end = 0
 
     print("\n" + "=" * 40)
     print("🚀 优化版姿态采集系统已启动（附带主目标锁定&角度特征提取）")
@@ -83,26 +86,48 @@ def main():
 
         if key == ord('q'): break
 
-        # 状态机逻辑
-        if not is_recording:
+        # 状态机：idle → countdown → recording → idle
+        if state == "idle":
             key_char = chr(key) if key != 255 else None
             if key_char in ACTION_MAP:
                 current_label = key_char
-                is_recording = True
                 memory_buffer = []
-                print(f"🎬 开始录制【{ACTION_MAP[current_label]}】，按 [空格] 结束...")
-        else:
+                countdown_end = time.time() + 5
+                state = "countdown"
+                print(f"⏳ 3秒倒计时开始，请就位【{ACTION_MAP[current_label]}】...")
+
+        elif state == "countdown":
             if key == ord(' '):
-                is_recording = False
+                state = "idle"
+                print("⚠️ 已取消。")
+                continue
+            if time.time() >= countdown_end:
+                state = "recording"
+                recording_end = time.time() + 15
+                print(f"🎬 开始录制【{ACTION_MAP[current_label]}】，15秒后自动结束...")
+
+        elif state == "recording":
+            if key == ord(' '):
+                state = "idle"
                 if len(memory_buffer) > 0:
-                    print(f"💾 正在写入 {len(memory_buffer)} 帧优化数据...")
+                    print(f"💾 提前结束，正在写入 {len(memory_buffer)} 帧...")
                     with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
                         csv.writer(f).writerows(memory_buffer)
                     print(f"✅ 【{ACTION_MAP[current_label]}】保存成功！\n")
                 memory_buffer = []
+                continue
+            if time.time() >= recording_end:
+                state = "idle"
+                if len(memory_buffer) > 0:
+                    print(f"💾 15秒到，正在写入 {len(memory_buffer)} 帧...")
+                    with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerows(memory_buffer)
+                    print(f"✅ 【{ACTION_MAP[current_label]}】保存成功！\n")
+                memory_buffer = []
+                continue
 
-        # ---------------- 核心优化区域 ----------------
-        if is_recording and results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
+        # ---------------- 核心数据提取区域 ----------------
+        if (state == "recording" or state == "countdown") and results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
             # 【优化1：防识别错人体】
             # 计算画面中所有人的 Bounding Box 面积，锁定面积最大的那个（通常是操作者本人）
             boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -149,12 +174,18 @@ def main():
                 ]
                 features.extend(angles)
                 features.append(int(current_label))
-                memory_buffer.append(features)
+                if state == "recording":
+                    memory_buffer.append(features)  # 只在正式录制阶段存数据
         # ----------------------------------------------
 
         # UI 渲染
-        if is_recording:
-            status_text = f"REC [{DISPLAY_MAP[current_label]}] | Frames: {len(memory_buffer)}"
+        if state == "countdown":
+            remaining = max(0, int(countdown_end - time.time()) + 1)
+            status_text = f"COUNTDOWN: {remaining}s | {DISPLAY_MAP[current_label]}"
+            color = (0, 255, 255)
+        elif state == "recording":
+            remaining = max(0, int(recording_end - time.time()))
+            status_text = f"REC [{DISPLAY_MAP[current_label]}] | {remaining}s left | Frames: {len(memory_buffer)}"
             color = (0, 0, 255)
         else:
             status_text = "STATUS: READY (Press 0-4)"
