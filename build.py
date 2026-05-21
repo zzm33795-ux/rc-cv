@@ -4,7 +4,7 @@ from audio import ShazamAlgorithm
 
 
 def main():
-    print("🚀 开始构建赛场级离线音频指纹库...")
+    print(" 开始构建离线音频指纹库...")
 
     # 初始化我们重构好的核心引擎
     engine = ShazamAlgorithm()

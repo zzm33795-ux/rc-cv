@@ -10,7 +10,7 @@ from PySide6.QtCore import QThread, Signal
 
 
 class ShazamAlgorithm:
-    """沙赞音频指纹算法：已升级 Dejavu 时间差对齐与概率分布架构"""
+    """沙赞音频指纹算法"""
 
     def __init__(self):
         self.song_database = {}

@@ -44,13 +44,11 @@ class VisionThread(QThread):
     def run(self):
         self.running = True
 
-        # 1. 加载推断模型
         if self.model is None:
             self.msg_signal.emit("⏳ 正在加载 YOLO 姿态推断模型...")
             self.model = YOLO('yolo26m-pose.pt')
             self.msg_signal.emit("✅ 姿态模型就绪。")
 
-        # 2. 加载分类器
         if self.clf_model is None:
             if os.path.exists("pose_classifier.pkl"):
                 self.msg_signal.emit("⏳ 正在加载动作分类器...")
@@ -71,6 +69,12 @@ class VisionThread(QThread):
 
         self.msg_signal.emit("🟢 视觉模块已启动，正在进行实时推断...")
 
+        kpt_labels = {
+            0: "Nose", 1: "LEye", 2: "REye", 3: "LEar", 4: "REar",
+            5: "LSh", 6: "RSh", 7: "LElb", 8: "RElb", 9: "LWr", 10: "RWr",
+            11: "LHip", 12: "RHip", 13: "LKne", 14: "RKne", 15: "LAnk", 16: "RAnk"
+        }
+
         while self.running and cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -78,7 +82,6 @@ class VisionThread(QThread):
 
             frame = cv2.flip(frame, 1)
 
-            # 硬件加速推断
             try:
                 results = self.model(frame, verbose=False, classes=0, device=0, half=True)
             except Exception:
@@ -87,9 +90,7 @@ class VisionThread(QThread):
             annotated_frame = results[0].plot()
             table_data = []
 
-            # ================= 核心推断与物理限位 =================
             if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-                # 目标锁定：仅处理画面中面积最大的人体
                 boxes = results[0].boxes.xyxy.cpu().numpy()
                 target_idx = np.argmax((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])) if len(boxes) > 1 else 0
 
@@ -97,9 +98,16 @@ class VisionThread(QThread):
                 confs = results[0].keypoints.conf[target_idx].cpu().numpy() if results[0].keypoints.conf is not None else np.ones(17)
 
                 if len(kpts) == 17:
+                    for i, (x, y) in enumerate(kpts):
+                        if confs[i] > 0.45 and (x > 0 or y > 0):
+                            coord_text = f"{kpt_labels[i]}:({int(x)},{int(y)})"
+                            cv2.putText(annotated_frame, coord_text,
+                                        (int(x) + 8, int(y) - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.32, (0, 255, 255), 1, cv2.LINE_AA)
+
                     action_name = "未识别"
 
-                    # 1. 提取归一化坐标特征 (34维)
                     hip_center_x, hip_center_y = (kpts[11][0] + kpts[12][0]) / 2, (kpts[11][1] + kpts[12][1]) / 2
                     sh_center_y = (kpts[5][1] + kpts[6][1]) / 2
                     torso_len = max(10.0, abs(hip_center_y - sh_center_y))
@@ -110,7 +118,6 @@ class VisionThread(QThread):
                         rel_y = (y - hip_center_y) / torso_len if y > 0 else 0
                         features.extend([rel_x, rel_y])
 
-                    # 2. 提取核心夹角特征 (8维)
                     angles = [
                         calculate_angle(kpts[5], kpts[7], kpts[9]),    # L-Elbow
                         calculate_angle(kpts[6], kpts[8], kpts[10]),   # R-Elbow
@@ -123,14 +130,12 @@ class VisionThread(QThread):
                     ]
                     features.extend(angles)
 
-                    # 3. 数据完整性熔断：下半身关键点丢失时直接拦截
                     legs_invisible = (
                         np.all(kpts[13] == 0) or np.all(kpts[14] == 0) or
                         np.all(kpts[15] == 0) or np.all(kpts[16] == 0) or
                         np.mean(confs[11:17]) < 0.4
                     )
 
-                    # 4. 分类器推断
                     if self.clf_model is not None:
                         try:
                             if legs_invisible:
@@ -142,13 +147,11 @@ class VisionThread(QThread):
 
                                 action_name = "正常活动" if pred_class == 4 else self.action_map.get(pred_class, "未知动作")
 
-                                # 几何逻辑限位：拦截非标准的“蹲下”误触
                                 if action_name == "蹲下" and (angles[6] > 130.0 or angles[7] > 130.0):
                                     action_name, action_conf = "正常活动", 0.0
 
                             table_data.append([f"ID-{target_idx + 1}", "人体姿态", f"{action_conf:.2f}", action_name])
 
-                            # 画面内联渲染
                             if action_name != "正常活动" and action_conf > 0.45:
                                 x1, y1 = int(results[0].boxes.xyxy[target_idx][0]), int(results[0].boxes.xyxy[target_idx][1])
                                 cv2.putText(annotated_frame, f"{action_name} {action_conf:.2f}",
@@ -159,7 +162,6 @@ class VisionThread(QThread):
 
             self.result_signal.emit(table_data)
 
-            # 格式转换推流
             rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
             qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888).copy()

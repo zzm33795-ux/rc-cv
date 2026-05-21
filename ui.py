@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
             self.audio_ui_elements.append(lbl)
             audio_layout.addWidget(lbl)
 
-        lbl_hist = QLabel("💾 极速匹配记录:")
+        lbl_hist = QLabel("💾 匹配记录:")
         lbl_hist.setStyleSheet("color: #ccc; font-weight: bold; margin-top: 5px;")
         audio_layout.addWidget(lbl_hist)
 
@@ -313,19 +313,29 @@ class MainWindow(QMainWindow):
 
                 if clean_action in self.target_actions and conf > threshold:
                     detected_this_frame.add(clean_action)
+
                     if not self.locked_actions[clean_action]:
                         self.action_counters[clean_action] += 1
+
+                        lbl = self.action_ui_elements[clean_action]
+                        lbl.setText(f"{clean_action} | Conf: {conf:.2f}")
+                        lbl.setStyleSheet("color: #f39c12; border: 1px solid #f39c12; font-weight: bold;")
+
                         if self.action_counters[clean_action] >= self.debounce_frames:
                             self.locked_actions[clean_action] = True
                             self.success_count += 1
                             self.stat_label.setText(f"姿态得分: {self.success_count * 10} / 40  (🔴 正在识别)")
-                            lbl = self.action_ui_elements[clean_action]
-                            lbl.setText(f"识别成功 (+10分) | {clean_action}")
+
+                            lbl.setText(f"{clean_action} | Conf: {conf:.2f}")
                             lbl.setStyleSheet("color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold;")
 
         for action in self.target_actions:
             if action not in detected_this_frame:
                 self.action_counters[action] = 0
+                if not self.locked_actions[action]:
+                    lbl = self.action_ui_elements[action]
+                    lbl.setText(f"等待指令 | {action}")
+                    lbl.setStyleSheet("")
 
     def update_audio_score(self, prob_dist):
         if not prob_dist:
@@ -346,7 +356,7 @@ class MainWindow(QMainWindow):
                     if song_name not in self.audio_history:
                         self.audio_history.append(song_name)
                         time_str = time.strftime('%H:%M:%S')
-                        self.audio_history_list.addItem(f"[{time_str}] 匹配成功 (+6分): {song_name}")
+                        self.audio_history_list.addItem(f"[{time_str}] 匹配成功: {song_name}")
                 else:
                     lbl.setStyleSheet("color: #e0e0e0;")
 
